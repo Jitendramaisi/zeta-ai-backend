@@ -1,27 +1,73 @@
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 from flask_cors import CORS
-from google import genai
+from flask_jwt_extended import JWTManager
+from config import config
+from models import db
+from auth import auth_bp
+from chat import chat_bp
+import logging
+from logging.handlers import RotatingFileHandler
 
-app = Flask(__name__)
-CORS(app)
+# Configure logging
+if not os.path.exists('logs'):
+    os.makedirs('logs')
 
-api_key = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key)
+file_handler = RotatingFileHandler('logs/zeta_ai.log', maxBytes=10240000, backupCount=10)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+))
+file_handler.setLevel(logging.INFO)
 
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    data = request.json
-    user_message = data.get('message', '')
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+
+logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, console_handler])
+logger = logging.getLogger(__name__)
+
+def create_app(config_name=None):
+    """Application factory"""
+    if config_name is None:
+        config_name = os.getenv('FLASK_ENV', 'development')
     
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=user_message
-        )
-        return jsonify({"reply": response.text})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    app = Flask(__name__)
+    app.config.from_object(config[config_name])
+    
+    # Initialize extensions
+    db.init_app(app)
+    CORS(app)
+    JWTManager(app)
+    
+    # Register blueprints
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(chat_bp)
+    
+    # Create database tables
+    with app.app_context():
+        db.create_all()
+    
+    # Health check endpoint
+    @app.route('/api/health', methods=['GET'])
+    def health_check():
+        return jsonify({'status': 'healthy', 'service': 'zeta-ai-backend'}), 200
+    
+    # Error handlers
+    @app.errorhandler(404)
+    def not_found(error):
+        return jsonify({'error': 'Endpoint not found'}), 404
+    
+    @app.errorhandler(500)
+    def internal_error(error):
+        logger.error(f'Internal server error: {error}')
+        return jsonify({'error': 'Internal server error'}), 500
+    
+    logger.info(f'Application initialized with config: {config_name}')
+    return app
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app = create_app()
+    port = int(os.getenv('SERVER_PORT', 5000))
+    host = os.getenv('SERVER_HOST', '0.0.0.0')
+    
+    logger.info(f'Starting Zeta AI Backend on {host}:{port}')
+    app.run(host=host, port=port, debug=app.config['DEBUG'])
